@@ -165,7 +165,7 @@ func runCmp(t *testing.T, f1, f2, msg string) {
 	cmd.Dir = tmp
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		t.Fatalf(msg)
+		t.Fatal(msg)
 	}
 }
 
