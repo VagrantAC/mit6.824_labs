@@ -12,12 +12,20 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"plugin"
 
+	log "github.com/sirupsen/logrus"
+
 	"6.5840/mr"
 )
+
+func init() {
+	log.SetFormatter(&log.TextFormatter{
+		DisableColors: false,
+		FullTimestamp: true,
+	})
+}
 
 func main() {
 	if len(os.Args) != 3 {

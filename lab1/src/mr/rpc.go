@@ -14,27 +14,56 @@ type RegisterResponse struct {
 	WorkerID int
 }
 
+type MapTask struct {
+	Id      string // map task filename
+	NReduce int
+}
+
+type ReduceTask struct {
+	Id        int // ihash value
+	Filenames []string
+}
+
 type AssignTaskRequest struct {
 	WorkerID int
 }
 
 type AssignTaskResponse struct {
-	MapTasks    []string
-	ReduceTasks []string
+	MapTask    *MapTask    // map task filename
+	ReduceTask *ReduceTask // reduce task filename
 }
 
-type ReportTaskRequest struct {
+type ReportMapTaskRequest struct {
+	WorkerID      int
+	MapTask       MapTask
+	ReduceTaskMap map[int]string
+}
+
+type ReportMapTaskResponse struct {
+}
+
+type ReportReduceTaskRequest struct {
+	WorkerID   int
+	ReduceTask ReduceTask
+	Filename   string
+}
+
+type ReportReduceTaskResponse struct {
+}
+
+type IsDoneRequest struct {
 	WorkerID int
-	TaskFile string
-	Filename string
 }
 
-type ReportTaskResponse struct {
+type IsDoneResponse struct {
+	Done bool
 }
 
 // Add your RPC definitions here.
 const (
-	RegisterFunc   = "Coordinator.Register"
-	AssignTaskFunc = "Coordinator.AssignTask"
-	ReportTaskFunc = "Coordinator.ReportTask"
+	RegisterFunc         = "Coordinator.Register"
+	AssignTaskFunc       = "Coordinator.AssignTask"
+	ReportReduceTaskFunc = "Coordinator.ReportReduceTask"
+	ReportMapTaskFunc    = "Coordinator.ReportMapTask"
+	IsDoneFunc           = "Coordinator.IsDone"
 )

@@ -19,7 +19,6 @@ import (
 )
 
 func init() {
-
 	log.SetFormatter(&log.TextFormatter{
 		DisableColors: false,
 		FullTimestamp: true,

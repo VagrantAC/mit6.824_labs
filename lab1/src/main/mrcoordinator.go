@@ -12,10 +12,24 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"time"
 
 	"6.5840/mr"
+	log "github.com/sirupsen/logrus"
 )
+
+func init() {
+	log.SetFormatter(&log.TextFormatter{
+		DisableColors: false,
+		FullTimestamp: true,
+		CallerPrettyfier: func(f *runtime.Frame) (string, string) {
+			_, filename := filepath.Split(f.File)
+			return filename, fmt.Sprintf("%d", f.Line)
+		},
+	})
+}
 
 func main() {
 	if len(os.Args) < 3 {

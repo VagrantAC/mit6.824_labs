@@ -7,9 +7,17 @@ import (
 	"net/rpc"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	log "github.com/sirupsen/logrus"
+)
+
+const (
+	RPCRetryCount   = 3
+	RPCRetryDelay   = 100 * time.Millisecond
+	WorkerSleepTime = 100 * time.Millisecond
 )
 
 // Map functions return a slice of KeyValue.
@@ -24,8 +32,6 @@ type JobWorker struct {
 	reducef  func(string, []string) string
 }
 
-// utils
-
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
 func ihash(key string) int {
@@ -37,15 +43,14 @@ func ihash(key string) int {
 func readFileContent(filename string) (string, error) {
 	file, err := os.Open(filename)
 	if err != nil {
-		log.Fatalf("cannot open %v", filename)
-		return "", err
+		return "", fmt.Errorf("cannot open %v: %w", filename, err)
 	}
+	defer file.Close()
+
 	content, err := io.ReadAll(file)
 	if err != nil {
-		log.Fatalf("cannot read %v", filename)
-		return "", err
+		return "", fmt.Errorf("cannot read %v: %w", filename, err)
 	}
-	file.Close()
 	return string(content), nil
 }
 
@@ -57,13 +62,17 @@ func Worker(sockname string, mapf func(string, string) []KeyValue,
 
 	coordSockName = sockname
 
-	worker := JobWorker{}
+	worker := JobWorker{
+		mapf:    mapf,
+		reducef: reducef,
+	}
 	if ok := worker.Register(); !ok {
 		return
 	}
 
-	for {
-
+	for worker.IsWaiting() {
+		worker.AssignTask()
+		time.Sleep(time.Millisecond * 100)
 	}
 }
 
@@ -71,50 +80,68 @@ func (worker *JobWorker) Register() bool {
 	logger := log.WithFields(logrus.Fields{"Func": RegisterFunc})
 	req := RegisterRequest{}
 	resp := RegisterResponse{}
-	ok := call(RegisterFunc, &req, &resp)
-	if ok {
-		logger.Infof("resp.WorkerID %v\n", resp.WorkerID)
-		worker.workerID = resp.WorkerID
-	} else {
-		logger.Printf("call failed!\n")
+
+	for i := range RPCRetryCount {
+		if call(RegisterFunc, &req, &resp) {
+			logger.Infof("resp.WorkerID %v\n", resp.WorkerID)
+			worker.workerID = resp.WorkerID
+			return true
+		}
+		if i < RPCRetryCount-1 {
+			time.Sleep(RPCRetryDelay)
+		}
 	}
-	return ok
+	logger.Printf("call failed after %d retries!\n", RPCRetryCount)
+	return false
 }
 
-func (worker *JobWorker) mapTask(taskFile string) ([]string, error) {
-	content, err := readFileContent(taskFile)
+func (worker *JobWorker) mapTask(task MapTask) error {
+	content, err := readFileContent(task.Id)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	kva := worker.mapf(taskFile, content)
+	kva := worker.mapf(task.Id, content)
 	taskMap := map[int][]KeyValue{}
 	for _, kv := range kva {
-		key := ihash(kv.Key)
+		key := ihash(kv.Key) % task.NReduce
 		if _, ok := taskMap[key]; !ok {
 			taskMap[key] = []KeyValue{}
 		}
 		taskMap[key] = append(taskMap[key], kv)
 	}
 
-	reduceIds := []string{}
+	reduceTaskMap := map[int]string{}
 
 	for key, kvs := range taskMap {
-		filename := GenReduceTaskFilename(taskFile, worker.workerID, key)
-		if err := WriteKeyValues(filename, kvs); err != nil {
-			return nil, err
+		filename, err := WriteKeyValues(kvs)
+		if err != nil {
+			return err
 		}
-		reduceIds = append(reduceIds, filename)
+		reduceTaskMap[key] = filename
 	}
-	return reduceIds, nil
+
+	for i := range RPCRetryCount {
+		if call(ReportMapTaskFunc, &ReportMapTaskRequest{
+			WorkerID:      worker.workerID,
+			MapTask:       task,
+			ReduceTaskMap: reduceTaskMap,
+		}, &ReportMapTaskResponse{}) {
+			return nil
+		}
+		if i < RPCRetryCount-1 {
+			time.Sleep(RPCRetryDelay)
+		}
+	}
+	return fmt.Errorf("failed to report map task after %d retries", RPCRetryCount)
 }
 
-func (worker *JobWorker) reduceTask(taskFiles []string) (string, error) {
+func (worker *JobWorker) reduceTask(task ReduceTask) error {
 	taskMap := map[string][]string{}
-	for _, file := range taskFiles {
+	for _, file := range task.Filenames {
 		kvs, err := ReadKeyValues(file)
 		if err != nil {
-			return "", err
+			return err
 		}
 		for _, kv := range kvs {
 			key := kv.Key
@@ -125,22 +152,37 @@ func (worker *JobWorker) reduceTask(taskFiles []string) (string, error) {
 		}
 	}
 
-	oname := "mr-out-" + strconv.Itoa(worker.workerID)
-	ofile, err := os.Create(oname)
-	if err != nil {
-		return "", err
-	}
-	defer ofile.Close()
-
+	var content strings.Builder
 	for key, values := range taskMap {
-		taskMap[key] = values
 		output := worker.reducef(key, values)
-		if _, err := fmt.Fprintf(ofile, "%v %v\n", key, output); err != nil {
-			return "", err
+		fmt.Fprintf(&content, "%v %v\n", key, output)
+	}
+
+	filename := "mr-out-" + strconv.Itoa(task.Id)
+
+	ofile, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	if _, err := ofile.WriteString(content.String()); err != nil {
+		ofile.Close()
+		return err
+	}
+	ofile.Close()
+
+	for i := range RPCRetryCount {
+		if call(ReportReduceTaskFunc, &ReportReduceTaskRequest{
+			WorkerID:   worker.workerID,
+			ReduceTask: task,
+			Filename:   filename,
+		}, &ReportReduceTaskResponse{}) {
+			return nil
+		}
+		if i < RPCRetryCount-1 {
+			time.Sleep(RPCRetryDelay)
 		}
 	}
-
-	return oname, nil
+	return fmt.Errorf("failed to report reduce task after %d retries", RPCRetryCount)
 }
 
 func (worker *JobWorker) AssignTask() bool {
@@ -150,23 +192,63 @@ func (worker *JobWorker) AssignTask() bool {
 	})
 	req := AssignTaskRequest{}
 	resp := AssignTaskResponse{}
-	ok := call(AssignTaskFunc, &req, &resp)
-	if ok {
-		logger.Infof("resp.TaskFile %v\n", resp.TaskFile)
-	} else {
-		logger.Printf("call failed!\n")
+
+	for i := range RPCRetryCount {
+		if call(AssignTaskFunc, &req, &resp) {
+			if resp.MapTask != nil {
+				logger.Infof("resp.MapTask %v\n", resp.MapTask)
+				if err := worker.mapTask(*resp.MapTask); err != nil {
+					logger.Errorf("map task failed: %v", err)
+					return false
+				}
+			}
+
+			if resp.ReduceTask != nil {
+				logger.Infof("resp.ReduceTask %v\n", resp.ReduceTask)
+				if err := worker.reduceTask(*resp.ReduceTask); err != nil {
+					logger.Errorf("reduce task failed: %v", err)
+					return false
+				}
+			}
+			return true
+		}
+		if i < RPCRetryCount-1 {
+			time.Sleep(RPCRetryDelay)
+		}
 	}
-	return ok
+	logger.Printf("call failed after %d retries!\n", RPCRetryCount)
+	return false
+}
+
+func (worker *JobWorker) IsWaiting() bool {
+	logger := log.WithFields(logrus.Fields{
+		"Func":     IsDoneFunc,
+		"WorkerID": worker.workerID,
+	})
+	req := IsDoneRequest{WorkerID: worker.workerID}
+	resp := IsDoneResponse{}
+
+	for i := range RPCRetryCount {
+		if call(IsDoneFunc, &req, &resp) {
+			logger.Infof("resp %v\n", resp)
+			return !resp.Done
+		}
+		if i < RPCRetryCount-1 {
+			time.Sleep(RPCRetryDelay)
+		}
+	}
+	logger.Printf("call failed after %d retries!\n", RPCRetryCount)
+	return false
 }
 
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
 func call(rpcname string, args interface{}, reply interface{}) bool {
-	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	c, err := rpc.DialHTTP("unix", coordSockName)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		log.Printf("dialing error: %v", err)
+		return false
 	}
 	defer c.Close()
 

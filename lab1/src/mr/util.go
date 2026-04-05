@@ -3,7 +3,9 @@ package mr
 import (
 	crand "crypto/rand"
 	"encoding/base64"
-	"log"
+	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 var tmp string
@@ -102,6 +106,7 @@ func mkCorrectOutput(files []string, app, out string) {
 }
 
 func mergeOutput(out string) {
+	fmt.Println("[=====]", tmp)
 	files := findFiles(tmp, `mr-out-[0-9]`)
 	if len(files) < 1 {
 		log.Fatalf("reduce created no mr-out-X output files!")
@@ -183,4 +188,49 @@ func countPattern(files []string, p string) int {
 		n += countPatternFile(f, p)
 	}
 	return n
+}
+
+func GenReduceTaskFilename(filename string, workerId, reduceId int) string {
+	return fmt.Sprintf("mr-%s-%d-%d", filename, workerId, reduceId)
+}
+
+func ReadKeyValues(filename string) ([]KeyValue, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Errorf("cannot open %v", filename)
+		return nil, err
+	}
+	defer file.Close()
+
+	kva := []KeyValue{}
+	dec := json.NewDecoder(file)
+	for {
+		var kv KeyValue
+		if err := dec.Decode(&kv); err == io.EOF {
+			break
+		} else if err != nil {
+			log.Errorf("cannot decode %v", err)
+			break
+		}
+		kva = append(kva, kv)
+	}
+	return kva, nil
+}
+
+func WriteKeyValues(kva []KeyValue) (string, error) {
+	file, err := os.CreateTemp("", "reduce-tmpout-")
+	if err != nil {
+		log.Errorf("cannot create %v", err)
+		return "", err
+	}
+	defer file.Close()
+
+	enc := json.NewEncoder(file)
+	for _, kv := range kva {
+		if err := enc.Encode(kv); err != nil {
+			log.Errorf("cannot encode %v", kv)
+			return "", err
+		}
+	}
+	return file.Name(), nil
 }
