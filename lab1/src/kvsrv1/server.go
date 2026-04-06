@@ -6,7 +6,7 @@ import (
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
 
 const Debug = false
@@ -22,10 +22,15 @@ type KVServer struct {
 	mu sync.Mutex
 
 	// Your definitions here.
+	data        map[string]string
+	dataVersion map[string]rpc.Tversion
 }
 
 func MakeKVServer() *KVServer {
-	kv := &KVServer{}
+	kv := &KVServer{
+		data:        make(map[string]string),
+		dataVersion: make(map[string]rpc.Tversion),
+	}
 	// Your code here.
 	return kv
 }
@@ -34,6 +39,16 @@ func MakeKVServer() *KVServer {
 // exists. Otherwise, Get returns ErrNoKey.
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if value, ok := kv.data[args.Key]; ok {
+		reply.Value = value
+		reply.Version = kv.dataVersion[args.Key]
+		reply.Err = rpc.OK
+		return
+	}
+
+	reply.Err = rpc.ErrNoKey
 }
 
 // Update the value for a key if args.Version matches the version of
@@ -42,6 +57,23 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 // args.Version is 0, and returns ErrNoKey otherwise.
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if version, ok := kv.dataVersion[args.Key]; ok {
+		if version != args.Version {
+			reply.Err = rpc.ErrVersion
+			return
+		}
+	} else {
+		if args.Version != 0 {
+			reply.Err = rpc.ErrNoKey
+			return
+		}
+	}
+	kv.data[args.Key] = args.Value
+	kv.dataVersion[args.Key]++
+	reply.Err = rpc.OK
 }
 
 // You can ignore all arguments; they are for replicated KVservers

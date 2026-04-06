@@ -1,7 +1,7 @@
 package lock
 
 import (
-	"6.5840/kvtest1"
+	kvtest "6.5840/kvtest1"
 )
 
 type Lock struct {
@@ -26,6 +26,7 @@ func MakeLock(ck kvtest.IKVClerk, lockname string) *Lock {
 }
 
 func (lk *Lock) Acquire() {
+	lk.ck.Acquire(lk.lockname)
 	// Your code here
 }
 
